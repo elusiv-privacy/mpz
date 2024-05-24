@@ -10,6 +10,7 @@ use crate::{
 use cipher::{KeyIvInit, StreamCipher};
 use itybity::ToBits;
 use mpz_core::{aes::FIXED_KEY_AES, Block};
+use generic_array::{ArrayLength, GenericArray};
 
 use rand::{Rng as _, SeedableRng};
 use rand_chacha::ChaCha20Rng;
@@ -444,6 +445,70 @@ impl SenderKeys {
             },
         })
     }
+
+    /// Encrypts the provided messages using the keys.
+    ///
+    /// # Arguments
+    ///
+    /// * `msgs` - The messages to encrypt
+    pub fn encrypt_generic_bytes<N: ArrayLength<u8>>(
+        self,
+        msgs: &[[GenericArray<u8, N>; 2]],
+    ) -> Result<SenderPayload, SenderError> {
+        if msgs.len() != self.keys.len() {
+            return Err(SenderError::InsufficientSetup(msgs.len(), self.keys.len()));
+        }
+
+        // Generate a random IV which is used for all messages.
+        // This is safe because every message is encrypted with a different key.
+        let iv: [u8; 16] = rand::thread_rng().gen();
+
+        // If we have derandomization, use it to correct the receiver's choices, else we use
+        // default
+        let flip = self
+            .derandomize
+            .map(|x| x.flip)
+            .unwrap_or_else(|| vec![0; self.keys.len() / 8 + 1]);
+
+        // Encrypt the chosen messages using the generated keys from ROT.
+        let ciphertexts = self
+            .keys
+            .into_iter()
+            .zip(msgs)
+            .zip(flip.iter_lsb0())
+            .flat_map(|(([k0, k1], [m0, m1]), flip)| {
+                // Initialize AES-CTR with the keys from ROT.
+                let mut e0 = Aes128Ctr::new(&k0.into(), &iv.into());
+                let mut e1 = Aes128Ctr::new(&k1.into(), &iv.into());
+
+                let mut m0 = m0.clone();
+                let mut m1 = m1.clone();
+
+                // Use Beaver derandomization to correct the receiver's choices
+                // from the extension phase.
+                if flip {
+                    e1.apply_keystream(&mut m0);
+                    e0.apply_keystream(&mut m1);
+                } else {
+                    e0.apply_keystream(&mut m0);
+                    e1.apply_keystream(&mut m1);
+                }
+
+                [m0, m1]
+            })
+            .flatten()
+            .collect();
+
+        Ok(SenderPayload {
+            id: self.id,
+            ciphertexts: Ciphertexts::Bytes {
+                ciphertexts,
+                iv: iv.to_vec(),
+                length: N::to_u32(),
+            },
+        })
+    }
+
 
     /// Returns the keys
     pub fn take_keys(self) -> Vec<[Block; 2]> {

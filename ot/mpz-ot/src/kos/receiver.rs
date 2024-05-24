@@ -6,6 +6,7 @@ use mpz_ot_core::kos::{
     msgs::{Message, StartExtend},
     pad_ot_count, receiver_state as state, Receiver as ReceiverCore, ReceiverConfig, CSP,
 };
+use generic_array::{ArrayLength, GenericArray};
 
 use enum_try_as_inner::EnumTryAsInner;
 use rand::{thread_rng, Rng};
@@ -391,6 +392,53 @@ where
 }
 
 #[async_trait]
+impl<N: ArrayLength<u8>, BaseOT> OTReceiver<bool, GenericArray<u8, N>> for Receiver<BaseOT>
+where
+    BaseOT: ProtocolMessage + Send,
+{
+    async fn receive<
+        Si: IoSink<Message<BaseOT::Msg>> + Send + Unpin,
+        St: IoStream<Message<BaseOT::Msg>> + Send + Unpin,
+    >(
+        &mut self,
+        sink: &mut Si,
+        stream: &mut St,
+        choices: &[bool],
+    ) -> Result<Vec<GenericArray<u8, N>>, OTError> {
+        let receiver = self
+            .state
+            .try_as_extension_mut()
+            .map_err(ReceiverError::from)?;
+
+        let mut receiver_keys = receiver.keys(choices.len()).map_err(ReceiverError::from)?;
+
+        let choices = choices.into_lsb0_vec();
+        let derandomize = receiver_keys
+            .derandomize(&choices)
+            .map_err(ReceiverError::from)?;
+
+        // Send derandomize message
+        sink.send(Message::Derandomize(derandomize)).await?;
+
+        // Receive payload
+        let payload = stream
+            .expect_next()
+            .await?
+            .try_into_sender_payload()
+            .map_err(ReceiverError::from)?;
+
+        let received = Backend::spawn(move || {
+            receiver_keys
+                .decrypt_generic_bytes(payload)
+                .map_err(ReceiverError::from)
+        })
+        .await?;
+
+        Ok(received)
+    }
+}
+
+#[async_trait]
 impl<const N: usize, BaseOT> RandomOTReceiver<bool, [u8; N]> for Receiver<BaseOT>
 where
     BaseOT: ProtocolMessage + Send,
@@ -421,6 +469,45 @@ where
                 .map(|block| {
                     let mut prg = Prg::from_seed(block);
                     let mut out = [0_u8; N];
+                    prg.fill_bytes(&mut out);
+                    out
+                })
+                .collect(),
+        ))
+    }
+}
+
+#[async_trait]
+impl<N: ArrayLength<u8>, BaseOT> RandomOTReceiver<bool, GenericArray<u8, N>> for Receiver<BaseOT>
+where
+    BaseOT: ProtocolMessage + Send,
+{
+    async fn receive_random<
+        Si: IoSink<Message<BaseOT::Msg>> + Send + Unpin,
+        St: IoStream<Message<BaseOT::Msg>> + Send + Unpin,
+    >(
+        &mut self,
+        _sink: &mut Si,
+        _stream: &mut St,
+        count: usize,
+    ) -> Result<(Vec<bool>, Vec<GenericArray<u8, N>>), OTError> {
+        let receiver = self
+            .state
+            .try_as_extension_mut()
+            .map_err(ReceiverError::from)?;
+
+        let (choices, random_outputs) = receiver
+            .keys(count)
+            .map_err(ReceiverError::from)?
+            .take_choices_and_keys();
+
+        Ok((
+            choices,
+            random_outputs
+                .into_iter()
+                .map(|block| {
+                    let mut prg = Prg::from_seed(block);
+                    let mut out = GenericArray::default();
                     prg.fill_bytes(&mut out);
                     out
                 })

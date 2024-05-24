@@ -15,6 +15,7 @@ use utils_aio::{
     sink::IoSink,
     stream::{ExpectStreamExt, IoStream},
 };
+use generic_array::{ArrayLength, GenericArray};
 
 use super::{into_base_sink, into_base_stream};
 use crate::{
@@ -422,6 +423,45 @@ where
 }
 
 #[async_trait]
+impl<N: ArrayLength<u8>, BaseOT> OTSender<[GenericArray<u8, N>; 2]> for Sender<BaseOT>
+where
+    BaseOT: ProtocolMessage + Send,
+{
+    async fn send<
+        Si: IoSink<Message<BaseOT::Msg>> + Send + Unpin,
+        St: IoStream<Message<BaseOT::Msg>> + Send + Unpin,
+    >(
+        &mut self,
+        sink: &mut Si,
+        stream: &mut St,
+        msgs: &[[GenericArray<u8, N>; 2]],
+    ) -> Result<(), OTError> {
+        let sender = self
+            .state
+            .try_as_extension_mut()
+            .map_err(SenderError::from)?;
+
+        let derandomize = stream
+            .expect_next()
+            .await?
+            .try_into_derandomize()
+            .map_err(SenderError::from)?;
+
+        let mut sender_keys = sender.keys(msgs.len()).map_err(SenderError::from)?;
+        sender_keys
+            .derandomize(derandomize)
+            .map_err(SenderError::from)?;
+        let payload = sender_keys.encrypt_generic_bytes(msgs).map_err(SenderError::from)?;
+
+        sink.send(Message::SenderPayload(payload))
+            .await
+            .map_err(SenderError::from)?;
+
+        Ok(())
+    }
+}
+
+#[async_trait]
 impl<const N: usize, BaseOT> RandomOTSender<[[u8; N]; 2]> for Sender<BaseOT>
 where
     BaseOT: ProtocolMessage + Send,
@@ -445,6 +485,42 @@ where
         let prng = |block| {
             let mut prg = Prg::from_seed(block);
             let mut out = [0_u8; N];
+            prg.fill_bytes(&mut out);
+            out
+        };
+
+        Ok(random_outputs
+            .take_keys()
+            .into_iter()
+            .map(|[a, b]| [prng(a), prng(b)])
+            .collect())
+    }
+}
+
+#[async_trait]
+impl<N: ArrayLength<u8>, BaseOT> RandomOTSender<[GenericArray<u8, N>; 2]> for Sender<BaseOT>
+where
+    BaseOT: ProtocolMessage + Send,
+{
+    async fn send_random<
+        Si: IoSink<Message<BaseOT::Msg>> + Send + Unpin,
+        St: IoStream<Message<BaseOT::Msg>> + Send + Unpin,
+    >(
+        &mut self,
+        _sink: &mut Si,
+        _stream: &mut St,
+        count: usize,
+    ) -> Result<Vec<[GenericArray<u8, N>; 2]>, OTError> {
+        let sender = self
+            .state
+            .try_as_extension_mut()
+            .map_err(SenderError::from)?;
+
+        let random_outputs = sender.keys(count).map_err(SenderError::from)?;
+
+        let prng = |block| {
+            let mut prg = Prg::from_seed(block);
+            let mut out = GenericArray::default();
             prg.fill_bytes(&mut out);
             out
         };

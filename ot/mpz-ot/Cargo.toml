@@ -36,6 +36,7 @@ enum-try-as-inner.workspace = true
 opaque-debug.workspace = true
 serde = { workspace = true, optional = true }
 cfg-if.workspace = true
+generic-array.workspace = true
 
 [dev-dependencies]
 rstest = { workspace = true }

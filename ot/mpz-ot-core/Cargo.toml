@@ -37,6 +37,7 @@ opaque-debug.workspace = true
 cfg-if.workspace = true
 bytemuck = { workspace = true, features = ["derive"] }
 enum-try-as-inner.workspace = true
+generic-array.workspace = true
 
 [dev-dependencies]
 rstest.workspace = true

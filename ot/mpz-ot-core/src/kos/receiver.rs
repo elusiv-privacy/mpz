@@ -14,6 +14,7 @@ use crate::{
 
 use itybity::{FromBitIterator, IntoBits, ToBits};
 use mpz_core::{aes::FIXED_KEY_AES, Block};
+use generic_array::{ArrayLength, GenericArray};
 
 use blake3::Hasher;
 use cipher::{KeyIvInit, StreamCipher};
@@ -576,6 +577,75 @@ impl ReceiverKeys {
                     msg.copy_from_slice(&ct[N..])
                 } else {
                     msg.copy_from_slice(&ct[..N])
+                };
+
+                e.apply_keystream(&mut msg);
+
+                msg
+            })
+            .collect())
+    }
+
+        /// Decrypts the sender's payload.
+    ///
+    /// # Verifiable OT
+    ///
+    /// Verifiable OT with KOS does not currently support byte payloads, so no record of this payload
+    /// will be recorded.
+    pub fn decrypt_generic_bytes<N: ArrayLength<u8>>(
+        self,
+        payload: SenderPayload,
+    ) -> Result<Vec<GenericArray<u8, N>>, ReceiverError> {
+        let SenderPayload { id, ciphertexts } = payload;
+
+        let Ciphertexts::Bytes {
+            ciphertexts,
+            iv,
+            length,
+        } = ciphertexts
+        else {
+            return Err(ReceiverError::InvalidPayload(
+                "expected byte ciphertexts".to_string(),
+            ));
+        };
+
+        if id != self.id {
+            return Err(ReceiverError::IdMismatch(self.id, id));
+        }
+
+        let length = length as usize;
+        if length != N::to_usize() {
+            return Err(ReceiverError::InvalidPayload(format!(
+                "invalid message length: expected {}, got {}",
+                N::to_usize(), length
+            )));
+        }
+
+        if ciphertexts.len() / (2 * length) != self.keys.len() {
+            return Err(ReceiverError::CountMismatch(
+                self.keys.len(),
+                ciphertexts.len() / (2 * length),
+            ));
+        }
+
+        let iv: [u8; 16] = iv
+            .try_into()
+            .map_err(|_| ReceiverError::InvalidPayload("invalid iv length".to_string()))?;
+
+        Ok(self
+            .keys
+            .into_iter()
+            .zip(self.choices)
+            .zip(ciphertexts.chunks(2 * N::to_usize()))
+            .map(|((key, c), ct)| {
+                // Initialize AES-CTR with the key from ROT.
+                let mut e = Aes128Ctr::new(&key.into(), &iv.into());
+
+                let mut msg = GenericArray::default();
+                if c {
+                    msg.copy_from_slice(&ct[N::to_usize()..])
+                } else {
+                    msg.copy_from_slice(&ct[..N::to_usize()])
                 };
 
                 e.apply_keystream(&mut msg);
